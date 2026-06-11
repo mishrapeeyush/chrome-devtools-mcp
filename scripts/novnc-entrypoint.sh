@@ -11,16 +11,17 @@ set -e
 export DISPLAY=:99
 rm -f /tmp/.X99-lock
 
-# Use GPU-accelerated Xvfb when an NVIDIA GPU is present (runtimeClassName:nvidia).
-# The +iglx flag enables indirect GLX so Chrome can use the real GPU via EGL/ANGLE,
-# producing authentic WebGL/canvas fingerprints that pass press-and-hold CAPTCHAs.
-# Falls back to pure software rendering when no GPU device is found.
+# GPU detection: use hardware-accelerated Xvfb (+iglx) when NVIDIA GPU is present,
+# otherwise fall back to optimised software rendering at a smaller resolution
+# (1280x800 is faster on CPU, 1440x900 for GPU where rendering cost is negligible).
+HAS_GPU=0
 if nvidia-smi >/dev/null 2>&1; then
+  HAS_GPU=1
   echo "[novnc-entrypoint] NVIDIA GPU detected — enabling hardware-accelerated display"
   Xvfb :99 -screen 0 1440x900x24 -ac +iglx >/tmp/xvfb.log 2>&1 &
 else
-  echo "[novnc-entrypoint] No GPU found — using software Xvfb"
-  Xvfb :99 -screen 0 1440x900x24 -ac >/tmp/xvfb.log 2>&1 &
+  echo "[novnc-entrypoint] No GPU — using optimised software Xvfb (1280x800)"
+  Xvfb :99 -screen 0 1280x800x24 -ac >/tmp/xvfb.log 2>&1 &
 fi
 sleep 1
 
@@ -28,7 +29,10 @@ sleep 1
 fluxbox >/tmp/fluxbox.log 2>&1 &
 
 # Share the X display over VNC, then bridge VNC -> WebSocket for noVNC.
-x11vnc -display :99 -nopw -forever -shared -rfbport 5900 -bg -quiet
+# -compress 6 and -quality 6 reduce bandwidth and improve perceived smoothness
+# on CPU-only pods where rendering is the bottleneck.
+x11vnc -display :99 -nopw -forever -shared -rfbport 5900 -bg -quiet \
+  -compress 6 -quality 6 -ncache 10
 websockify --web=/usr/share/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 &
 
 echo "[novnc-entrypoint] noVNC at http://localhost:6080/vnc.html  | MCP at http://localhost:8090/mcp"
@@ -84,6 +88,17 @@ if [ -n "${CHROME_PROXY:-}" ]; then
   echo "[novnc-entrypoint] Proxy enabled: ${CHROME_PROXY}"
 fi
 
+# Build GPU/CPU-specific Chrome rendering flags.
+# On GPU pods: force hardware rasterisation via ANGLE/EGL for authentic fingerprints.
+# On CPU pods: disable GPU pipeline entirely so Chrome doesn't stall on missing HW.
+if [ "$HAS_GPU" = "1" ]; then
+  RENDER_FLAGS="--use-gl=angle --use-angle=gl-egl --enable-gpu-rasterization --ignore-gpu-blocklist"
+  WIN_SIZE="--window-size=1440,900"
+else
+  RENDER_FLAGS="--disable-gpu --disable-gpu-compositing --disable-software-rasterizer --in-process-gpu"
+  WIN_SIZE="--window-size=1280,800"
+fi
+
 # Launch Chrome eagerly so it is always visible in the VNC from pod start.
 # Stealth flags: suppress all automation signals that bot-detection fingerprints.
 /usr/local/bin/chrome \
@@ -108,11 +123,8 @@ fi
   --mute-audio \
   --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
   --lang=en-US \
-  --window-size=1440,900 \
-  --use-gl=angle \
-  --use-angle=gl-egl \
-  --enable-gpu-rasterization \
-  --ignore-gpu-blocklist \
+  ${WIN_SIZE} \
+  ${RENDER_FLAGS} \
   --remote-debugging-port=9222 \
   --remote-debugging-address=0.0.0.0 \
   ${PROXY_FLAG} \
