@@ -12,6 +12,18 @@
 
 FROM chrome-devtools-mcp:local
 
+# Build-time labels for identification.
+# Pass --build-arg BUILD_DATE=$(date -u +%Y%m%dT%H%M%SZ) to stamp a timestamp.
+ARG BUILD_DATE=unknown
+ARG GIT_SHA=unknown
+
+LABEL org.opencontainers.image.title="chrome-devtools-mcp-novnc" \
+      org.opencontainers.image.description="Headful Chrome + noVNC + MCP proxy for on-demand ephemeral browser sessions" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      com.ondemand.component="chrome-mcp" \
+      com.ondemand.variant="novnc"
+
 USER root
 
 RUN apt-get update \
@@ -21,12 +33,18 @@ RUN apt-get update \
         novnc \
         websockify \
         fluxbox \
+        xdotool \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/novnc-entrypoint.sh /app/scripts/novnc-entrypoint.sh
+COPY scripts/stealth-inject.js /app/scripts/stealth-inject.js
 RUN chmod +x /app/scripts/novnc-entrypoint.sh
 
 ENV DISPLAY=:99
+# Tell the NVIDIA container runtime to expose all driver capabilities
+# (utility, compute, graphics) so nvidia-smi and GPU rendering are available.
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+ENV NVIDIA_VISIBLE_DEVICES=all
 
 EXPOSE 8090 6080
 
