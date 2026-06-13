@@ -1,13 +1,14 @@
 # syntax=docker/dockerfile:1
 # Interactive variant: headful Chrome on a virtual display, viewable/controllable
-# over the web via noVNC. Lets a human take over the REMOTE browser for
-# login / OTP / CAPTCHA / payment.
+# over the web via a CDP-screencast live view (the same technique Browserbase
+# uses). Lets a human take over the REMOTE browser for login / OTP / CAPTCHA /
+# payment, without the latency of x11vnc/noVNC framebuffer encoding.
 #
 # Build (after building chrome-devtools-mcp:local):
 #   docker build --platform linux/amd64 -f Dockerfile.novnc -t chrome-devtools-mcp:novnc .
 # Run:
 #   docker run --rm -p 8090:8090 -p 6080:6080 chrome-devtools-mcp:novnc
-# Then open http://localhost:6080/vnc.html and point an MCP client at
+# Then open http://localhost:6080/ and point an MCP client at
 #   http://localhost:8090/mcp
 
 FROM chrome-devtools-mcp:local
@@ -26,19 +27,22 @@ LABEL org.opencontainers.image.title="chrome-devtools-mcp-novnc" \
 
 USER root
 
+# Only a virtual display + window manager are needed now; the live view is
+# served by the CDP-screencast bridge (Node), so x11vnc/noVNC/websockify are
+# no longer installed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         xvfb \
-        x11vnc \
-        novnc \
-        websockify \
         fluxbox \
         xdotool \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/novnc-entrypoint.sh /app/scripts/novnc-entrypoint.sh
+COPY scripts/brightdata-entrypoint.sh /app/scripts/brightdata-entrypoint.sh
+COPY scripts/brightdata-config.mjs /app/scripts/brightdata-config.mjs
 COPY scripts/stealth-inject.js /app/scripts/stealth-inject.js
-RUN chmod +x /app/scripts/novnc-entrypoint.sh
+COPY scripts/screencast-bridge.mjs /app/scripts/screencast-bridge.mjs
+RUN chmod +x /app/scripts/novnc-entrypoint.sh /app/scripts/brightdata-entrypoint.sh
 
 ENV DISPLAY=:99
 # Tell the NVIDIA container runtime to expose all driver capabilities

@@ -1,12 +1,24 @@
 #!/bin/sh
 # Interactive entrypoint: runs a HEADFUL Chrome on a virtual X display and
-# exposes it over the web via VNC -> noVNC, so a human can take over the
-# remote browser (login, OTP, CAPTCHA, payment).
+# exposes a fast, interactive live view over the web using CDP screencast
+# (the same technique Browserbase uses) so a human can take over the remote
+# browser (login, OTP, CAPTCHA, payment).
+#
+# Live view: Chrome's compositor emits JPEG frames of just the page viewport
+# (only on change) over CDP — far lighter than encoding the whole X11 desktop
+# with x11vnc/noVNC, which was the previous (sluggish) approach. The bridge in
+# scripts/screencast-bridge.mjs streams those frames to a <canvas> and forwards
+# the viewer's mouse/keyboard back via the CDP Input domain.
 #
 # Ports:
 #   8090 -> MCP (streamable_http) at /mcp
-#   6080 -> noVNC web UI (open http://localhost:6080/vnc.html)
+#   6080 -> live view web UI (any path serves the viewer, incl. /vnc.html)
 set -e
+
+# Bright Data Browser API: skip local Chrome/Xvfb and attach MCP + live view to BD.
+if [ -n "${BRIGHTDATA_AUTH:-}" ] || { [ -n "${BRIGHTDATA_USER:-}" ] && [ -n "${BRIGHTDATA_PASS:-}" ]; }; then
+  exec /app/scripts/brightdata-entrypoint.sh
+fi
 
 export DISPLAY=:99
 rm -f /tmp/.X99-lock
@@ -28,14 +40,7 @@ sleep 1
 # Minimal window manager (keeps Chrome maximized / decorated).
 fluxbox >/tmp/fluxbox.log 2>&1 &
 
-# Share the X display over VNC, then bridge VNC -> WebSocket for noVNC.
-# -compress 6 and -quality 6 reduce bandwidth and improve perceived smoothness
-# on CPU-only pods where rendering is the bottleneck.
-x11vnc -display :99 -nopw -forever -shared -rfbport 5900 -bg -quiet \
-  -compress 6 -quality 6 -ncache 10
-websockify --web=/usr/share/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 &
-
-echo "[novnc-entrypoint] noVNC at http://localhost:6080/vnc.html  | MCP at http://localhost:8090/mcp"
+echo "[novnc-entrypoint] live view (CDP screencast) at http://localhost:6080/  | MCP at http://localhost:8090/mcp"
 
 # Patch the Chrome binary's reported DevTools version to remove automation
 # indicators visible via the /json/version endpoint.
@@ -154,6 +159,19 @@ sleep 2
 kill -0 $STEALTH_PID 2>/dev/null && \
   echo "[novnc-entrypoint] stealth-inject running (pid $STEALTH_PID)" || \
   echo "[novnc-entrypoint] warn: stealth-inject exited early"
+
+# Start the interactive CDP-screencast live-view bridge on :6080. It connects
+# to the same Chrome DevTools endpoint, streams viewport JPEG frames to the
+# browser, and forwards viewer input back via CDP. Match the capture size to
+# the display so frames are 1:1 with the rendered window.
+if [ "$HAS_GPU" = "1" ]; then
+  SCREENCAST_MAX_WIDTH=1440 SCREENCAST_MAX_HEIGHT=900 \
+    node /app/scripts/screencast-bridge.mjs >/tmp/screencast.log 2>&1 &
+else
+  SCREENCAST_MAX_WIDTH=1280 SCREENCAST_MAX_HEIGHT=800 \
+    node /app/scripts/screencast-bridge.mjs >/tmp/screencast.log 2>&1 &
+fi
+echo "[novnc-entrypoint] screencast bridge started (pid $!)"
 
 # Attach mcp-proxy to the already-running Chrome via its HTTP remote-debugging
 # endpoint. --browserUrl tells chrome-devtools-mcp to call /json/version to

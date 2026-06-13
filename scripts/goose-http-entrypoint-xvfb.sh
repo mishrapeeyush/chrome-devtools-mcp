@@ -12,6 +12,9 @@
 # HEADFUL=1 runs headed Chrome on an Xvfb virtual display (real UA, fewer bot
 # blocks). Unset/0 runs headless.
 #
+# BRIGHTDATA_AUTH (or BRIGHTDATA_USER+BRIGHTDATA_PASS) uses Bright Data Browser
+# API instead of local Chrome — no Xvfb/proxy needed. Optional BRIGHTDATA_COUNTRY=ae.
+#
 # PROXY_SERVER routes Chrome traffic through a proxy (e.g. a residential proxy)
 # to get a non-datacenter IP. Needed for sites that edge-block datacenter IPs
 # (e.g. MakeMyTrip served a blank "200-OK" stub from a cloud IP).
@@ -28,6 +31,23 @@ set -e
 
 PORT="${PORT:-8080}"
 HOST="${HOST:-0.0.0.0}"
+
+# Bright Data Browser API — managed remote Chrome over CDP.
+if [ -n "${BRIGHTDATA_AUTH:-}" ] || { [ -n "${BRIGHTDATA_USER:-}" ] && [ -n "${BRIGHTDATA_PASS:-}" ]; }; then
+  CHROME_WS_ENDPOINT="$(node /app/scripts/brightdata-config.mjs --print-endpoint)"
+  echo "[entrypoint] Bright Data Browser API mode -> ${BRIGHTDATA_HOST:-brd.superproxy.io}"
+  exec /app/node_modules/.bin/mcp-proxy \
+    --port "$PORT" \
+    --host "$HOST" \
+    --server stream \
+    --stateless \
+    --connectionTimeout "${MCP_CONNECTION_TIMEOUT:-120000}" \
+    --requestTimeout "${MCP_REQUEST_TIMEOUT:-3600000}" \
+    -- \
+    node /app/build/src/bin/chrome-devtools-mcp.js \
+    --wsEndpoint "$CHROME_WS_ENDPOINT" \
+    --experimental-vision
+fi
 
 # Default headless launch flags.
 CHROME_FLAGS="--headless"

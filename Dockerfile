@@ -39,6 +39,7 @@ ENV NODE_ENV=production \
 COPY --from=build /app/build ./build
 COPY --from=build /app/LICENSE ./LICENSE
 COPY scripts/goose-http-entrypoint.mjs /app/scripts/
+COPY scripts/brightdata-config.mjs /app/scripts/
 
 # Install "Chrome for Testing" into the Puppeteer cache and expose it at a
 # fixed path. Xvfb is included so the server can run Chrome HEADFUL (HEADFUL=1)

@@ -35,6 +35,17 @@ description: Uses Chrome DevTools via MCP for efficient debugging, troubleshooti
 
 You can send multiple tool calls in parallel, but maintain correct order: navigate → wait → snapshot → interact.
 
+### Expedia / DataDome (PerimeterX session trust)
+
+For **expedia.com** / **expedia.ae**, load the `expedia-datadome` skill first. Critical rules:
+
+- **Never** `navigate_page` to `Hotel-Search?regionId=...` — use the on-page search widget
+- Enter via **Google → organic click**, dwell **8–12s** on travel-guide page, **same tab** throughout
+- **`behavior_baseline` install → dwell/fidget → finalize** before Search — captures session rhythm
+- **`click_human`** on Search with `useBaseline: true` (not `click`) — baseline-normalized Bezier + timing
+- **`human_hover_path`** for pre-search fidget on Dates/Travelers
+- On captcha iframe → `request_user_input` + noVNC handoff
+
 ### Testing an extension
 
 1. **Install**: Use `install_extension` with the path to the unpacked extension.

@@ -20,6 +20,8 @@ import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {InMemoryEventStore, proxyServer, startHTTPServer, tapTransport} from 'mcp-proxy';
 import {createClient} from 'redis';
 
+import {buildBrightDataWsEndpoint, parseBrightDataAuth} from './brightdata-config.mjs';
+
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? '0.0.0.0';
 const REDIS_URL = process.env.REDIS_URL?.trim() ?? '';
@@ -33,21 +35,32 @@ const CHROME_MCP_BIN = '/app/build/src/bin/chrome-devtools-mcp.js';
 // User-Agent that many anti-bot services block. Defaults to headless.
 const HEADFUL = /^(1|true|yes)$/i.test(process.env.HEADFUL?.trim() ?? '');
 
-const CHROME_ARGS = [
-  CHROME_MCP_BIN,
-  ...(HEADFUL
-    ? [
-        '--headless=false',
-        '--chrome-arg=--disable-blink-features=AutomationControlled',
-        '--ignore-default-chrome-arg=--enable-automation',
-      ]
-    : ['--headless']),
-  '--isolated',
-  '--executablePath=/usr/local/bin/chrome',
-  '--chrome-arg=--no-sandbox',
-  '--chrome-arg=--disable-setuid-sandbox',
-  '--chrome-arg=--disable-dev-shm-usage',
-];
+function buildChromeMcpArgs() {
+  if (parseBrightDataAuth()) {
+    const wsEndpoint =
+      process.env.CHROME_WS_ENDPOINT?.trim() ?? buildBrightDataWsEndpoint();
+    console.error('[goose-mcp] Bright Data Browser API backend');
+    return [CHROME_MCP_BIN, '--wsEndpoint', wsEndpoint, '--experimental-vision'];
+  }
+
+  return [
+    CHROME_MCP_BIN,
+    ...(HEADFUL
+      ? [
+          '--headless=false',
+          '--chrome-arg=--disable-blink-features=AutomationControlled',
+          '--ignore-default-chrome-arg=--enable-automation',
+        ]
+      : ['--headless']),
+    '--isolated',
+    '--executablePath=/usr/local/bin/chrome',
+    '--chrome-arg=--no-sandbox',
+    '--chrome-arg=--disable-setuid-sandbox',
+    '--chrome-arg=--disable-dev-shm-usage',
+  ];
+}
+
+const CHROME_ARGS = buildChromeMcpArgs();
 
 /** @param {import('node:http').IncomingMessage | undefined} req */
 function redisChannelFromRequest(req) {

@@ -51,6 +51,7 @@ import {
   getTempFilePath,
   resolveCanonicalPath,
 } from './utils/files.js';
+import type {BehaviorBaseline} from './utils/behaviorBaseline.js';
 import {getNetworkMultiplierFromString} from './WaitForHelper.js';
 
 interface McpContextOptions {
@@ -64,8 +65,8 @@ interface McpContextOptions {
   proxyCredentials?: {username: string; password: string};
 }
 
-const DEFAULT_TIMEOUT = 5_000;
-const NAVIGATION_TIMEOUT = 10_000;
+const DEFAULT_TIMEOUT = 10_000;
+const NAVIGATION_TIMEOUT = 30_000;
 
 export class McpContext implements Context {
   browser: Browser;
@@ -101,6 +102,7 @@ export class McpContext implements Context {
   #options: McpContextOptions;
   #heapSnapshotManager = new HeapSnapshotManager();
   #roots: Root[] | undefined = undefined;
+  #behaviorBaseline: BehaviorBaseline | undefined = undefined;
 
   private constructor(
     browser: Browser,
@@ -898,5 +900,17 @@ export class McpContext implements Context {
     nodeId: number,
   ): Promise<DevTools.HeapSnapshotModel.HeapSnapshotModel.ItemsRange> {
     return await this.#heapSnapshotManager.getRetainers(filePath, nodeId);
+  }
+
+  setBehaviorBaseline(baseline: BehaviorBaseline): void {
+    this.#behaviorBaseline = baseline;
+  }
+
+  getBehaviorBaseline(): BehaviorBaseline | undefined {
+    return this.#behaviorBaseline;
+  }
+
+  clearBehaviorBaseline(): void {
+    this.#behaviorBaseline = undefined;
   }
 }

@@ -13,6 +13,19 @@ import {zod} from '../third_party/index.js';
 import type {ElementHandle, KeyInput} from '../third_party/index.js';
 import type {TextSnapshotNode} from '../types.js';
 import {parseKey} from '../utils/keyboard.js';
+import {
+  humanMouseMove,
+  randomApproachStart,
+  randomPointInBox,
+  sleep,
+} from '../utils/humanMouse.js';
+import {
+  humanMouseMoveWithBaseline,
+  installBehaviorBaselineProbe,
+  normalizedHumanClick,
+  puppeteerMouseClickable,
+  readBehaviorBaselineProbe,
+} from '../utils/behaviorBaseline.js';
 import type {WaitForEventsResult} from '../WaitForHelper.js';
 
 const execFileAsync = promisify(execFile);
@@ -132,6 +145,222 @@ export const click = definePageTool({
         request.params.dblClick
           ? `Successfully double clicked on the element`
           : `Successfully clicked on the element`,
+      );
+      response.attachWaitForResult(result);
+      if (request.params.includeSnapshot) {
+        response.includeSnapshot();
+      }
+    } catch (error) {
+      handleActionError(error, uid);
+    } finally {
+      void handle.dispose();
+    }
+  },
+});
+
+export const behaviorBaseline = definePageTool({
+  name: 'behavior_baseline',
+  description: `Install or finalize a behavioral rhythm probe on the current page for DataDome baseline normalization. Call action=install at the start of travel-guide dwell, perform scroll/hover fidget for 8-12s, then action=finalize before click_human on Search. The captured move/click timing profile is reused so the search click matches the session baseline instead of bot-constant speed.`,
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: false,
+  },
+  schema: {
+    action: zod
+      .enum(['install', 'finalize', 'clear'])
+      .describe(
+        'install: start recording mousemove/click timing on this page. finalize: read probe metrics and store session baseline. clear: discard stored baseline.',
+      ),
+  },
+  blockedByDialog: false,
+  verifyFilesSchema: [],
+  handler: async (request, response, context) => {
+    const page = request.page.pptrPage;
+    if (request.params.action === 'clear') {
+      context.clearBehaviorBaseline();
+      response.appendResponseLine('Behavior baseline cleared for this session.');
+      return;
+    }
+    if (request.params.action === 'install') {
+      await installBehaviorBaselineProbe(page);
+      response.appendResponseLine(
+        'Behavior baseline probe installed. Dwell 8-12s with human_hover_path and scroll, then call behavior_baseline action=finalize before click_human.',
+      );
+      return;
+    }
+    const baseline = await readBehaviorBaselineProbe(page);
+    if (!baseline) {
+      throw new Error(
+        'No baseline probe data — call behavior_baseline action=install first, dwell on the page, then finalize.',
+      );
+    }
+    context.setBehaviorBaseline(baseline);
+    response.appendResponseLine(
+      `Baseline captured: meanMoveIntervalMs=${Math.round(baseline.meanMoveIntervalMs)}, variance=${Math.round(baseline.moveIntervalVariance)}, meanClickPauseMs=${Math.round(baseline.meanClickPauseMs)}, moveSamples=${baseline.moveSampleCount}. Use click_human with useBaseline=true on Search.`,
+    );
+  },
+});
+
+export const clickHuman = definePageTool({
+  name: 'click_human',
+  description: `Clicks an element using a human-like mouse trajectory (Gaussian-smoothed path or baseline-normalized Bezier when a behavior baseline was captured via behavior_baseline). REQUIRED for high-scrutiny actions on DataDome/PerimeterX sites (e.g. Expedia search button) where \`click\` triggers intent-based bot detection. Workflow: behavior_baseline install → dwell/fidget → behavior_baseline finalize → click_human on Search.`,
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: false,
+  },
+  schema: {
+    uid: zod
+      .string()
+      .describe(
+        'The uid of an element on the page from the page content snapshot',
+      ),
+    durationMs: zod
+      .number()
+      .optional()
+      .describe(
+        'Mouse travel duration in ms (default 900). Use 1200-1800 for search buttons.',
+      ),
+    preHoverMs: zod
+      .number()
+      .optional()
+      .describe(
+        'Pause at target before mousedown in ms (default 200-450 random).',
+      ),
+    useBaseline: zod
+      .boolean()
+      .optional()
+      .describe(
+        'When true (default), use behavior_baseline profile if captured. Set false to force generic Gaussian path.',
+      ),
+    includeSnapshot: includeSnapshotSchema,
+  },
+  blockedByDialog: true,
+  verifyFilesSchema: [],
+  handler: async (request, response, context) => {
+    const uid = request.params.uid;
+    const handle = await request.page.getElementByUid(uid);
+    try {
+      const box = await handle.boundingBox();
+      if (!box) {
+        throw new Error(
+          `Element ${uid} has no bounding box — cannot human-click.`,
+        );
+      }
+      const durationMs = request.params.durationMs ?? 900;
+      const preHoverMs =
+        request.params.preHoverMs ??
+        Math.round(200 + Math.random() * 250);
+      const useBaseline = request.params.useBaseline ?? true;
+      const baseline =
+        useBaseline ? context.getBehaviorBaseline() : undefined;
+      const page = request.page.pptrPage;
+      const mouse = page.mouse;
+      let clickSummary = '';
+
+      const result = await request.page.waitForEventsAfterAction(async () => {
+        if (baseline) {
+          const target = await normalizedHumanClick(
+            puppeteerMouseClickable(mouse),
+            box,
+            baseline,
+            durationMs,
+            preHoverMs,
+          );
+          clickSummary = `Baseline-normalized click at (${target.x},${target.y}) meanInterval=${Math.round(baseline.meanMoveIntervalMs)}ms`;
+        } else {
+          const target = randomPointInBox(box.x, box.y, box.width, box.height);
+          const start = randomApproachStart(target.x, target.y);
+          await humanMouseMove(
+            mouse,
+            start.x,
+            start.y,
+            target.x,
+            target.y,
+            durationMs,
+          );
+          await sleep(preHoverMs);
+          await mouse.click(target.x, target.y);
+          clickSummary = `Human-like click at (${target.x},${target.y}) after ${durationMs}ms approach`;
+        }
+      });
+      response.appendResponseLine(clickSummary);
+      response.attachWaitForResult(result);
+      if (request.params.includeSnapshot) {
+        response.includeSnapshot();
+      }
+    } catch (error) {
+      handleActionError(error, uid);
+    } finally {
+      void handle.dispose();
+    }
+  },
+});
+
+export const humanHoverPath = definePageTool({
+  name: 'human_hover_path',
+  description: `Moves the mouse along a human-like curved path to an element and hovers (no click). Use for pre-search "fidget" micro-interactions on booking forms — hover date field, travelers, nearby links before click_human on Search.`,
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: false,
+  },
+  schema: {
+    uid: zod.string().describe('Element uid to hover over'),
+    durationMs: zod
+      .number()
+      .optional()
+      .describe('Travel duration in ms (default 700)'),
+    dwellMs: zod
+      .number()
+      .optional()
+      .describe('Hover pause at target in ms (default 400-900 random)'),
+    includeSnapshot: includeSnapshotSchema,
+  },
+  blockedByDialog: true,
+  verifyFilesSchema: [],
+  handler: async (request, response, context) => {
+    const uid = request.params.uid;
+    const handle = await request.page.getElementByUid(uid);
+    try {
+      const box = await handle.boundingBox();
+      if (!box) {
+        throw new Error(`Element ${uid} has no bounding box.`);
+      }
+      const target = randomPointInBox(box.x, box.y, box.width, box.height);
+      const start = randomApproachStart(target.x, target.y);
+      const durationMs = request.params.durationMs ?? 700;
+      const dwellMs =
+        request.params.dwellMs ?? Math.round(400 + Math.random() * 500);
+      const baseline = context.getBehaviorBaseline();
+      const page = request.page.pptrPage;
+
+      const result = await request.page.waitForEventsAfterAction(async () => {
+        if (baseline) {
+          await humanMouseMoveWithBaseline(
+            page.mouse,
+            start.x,
+            start.y,
+            target.x,
+            target.y,
+            baseline,
+            durationMs,
+          );
+        } else {
+          await humanMouseMove(
+            page.mouse,
+            start.x,
+            start.y,
+            target.x,
+            target.y,
+            durationMs,
+          );
+        }
+        await sleep(dwellMs);
+      });
+
+      response.appendResponseLine(
+        baseline
+          ? `Baseline-normalized hover to (${target.x},${target.y}), dwelled ${dwellMs}ms`
+          : `Human hover path to (${target.x},${target.y}), dwelled ${dwellMs}ms`,
       );
       response.attachWaitForResult(result);
       if (request.params.includeSnapshot) {
@@ -618,32 +847,12 @@ export const mouseDragHuman = definePageTool({
     const {startX, startY, endX, endY, durationMs = 2000} = request.params;
     const page = request.page.pptrPage;
 
-    // Bezier easing: ease-in-out cubic
-    const ease = (t: number): number =>
-      t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
-    const steps = Math.max(50, Math.round(durationMs / 20));
-    const delayPerStep = durationMs / steps;
-
-    // Move to start, press down
     await page.mouse.move(startX, startY);
     await page.mouse.down();
 
-    for (let i = 1; i <= steps; i++) {
-      const t = ease(i / steps);
-      // Add natural hand tremor: small random jitter that grows then fades
-      const jitter = Math.sin(i * 0.8) * 1.5 * (1 - Math.abs(t - 0.5) * 2);
-      const nx = startX + (endX - startX) * t + (Math.random() - 0.5) * 2;
-      const ny =
-        startY + (endY - startY) * t + jitter + (Math.random() - 0.5) * 1.5;
-      await page.mouse.move(nx, ny);
-      await new Promise(resolve => setTimeout(resolve, delayPerStep));
-    }
+    await humanMouseMove(page.mouse, startX, startY, endX, endY, durationMs);
 
-    // Hold at end for a moment before releasing (mimics human pause)
-    await new Promise(resolve =>
-      setTimeout(resolve, 150 + Math.random() * 100),
-    );
+    await sleep(150 + Math.random() * 100);
     await page.mouse.up();
 
     response.appendResponseLine(

@@ -24,6 +24,7 @@ import type {
   ExtensionServiceWorker,
 } from '../types.js';
 import type {PaginationOptions} from '../utils/types.js';
+import type {BehaviorBaseline} from '../utils/behaviorBaseline.js';
 import type {WaitForEventsResult} from '../WaitForHelper.js';
 
 import type {ToolCategory} from './categories.js';
@@ -251,6 +252,9 @@ export type Context = Readonly<{
     filePath: string,
     nodeId: number,
   ): Promise<DevTools.HeapSnapshotModel.HeapSnapshotModel.ItemsRange>;
+  setBehaviorBaseline(baseline: BehaviorBaseline): void;
+  getBehaviorBaseline(): BehaviorBaseline | undefined;
+  clearBehaviorBaseline(): void;
 }>;
 
 /**
