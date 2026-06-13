@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 /**
+ * @license
+ * Copyright 2026 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
  * Minimal Expedia test — mirrors Bright Data Playground pattern:
  *   goto(expedia.com) → dismiss popups → check homepage (no Google warm-up)
  *
@@ -8,6 +14,7 @@
  *     node scripts/test-expedia-playground.mjs
  */
 import puppeteer from 'puppeteer-core';
+
 import {buildBrightDataWsEndpoint, parseBrightDataAuth} from './brightdata-config.mjs';
 
 const SETTLE_MS = Number(process.env.EXPEDIA_SETTLE_MS ?? 3000);

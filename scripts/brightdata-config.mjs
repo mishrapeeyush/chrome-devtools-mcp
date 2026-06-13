@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 /**
+ * @license
+ * Copyright 2026 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
  * Bright Data Browser API configuration helper.
  *
  * Env (one of):
@@ -117,8 +123,8 @@ export function buildBrightDataWsEndpoint(options = {}) {
   return `wss://${username}:${parsed.pass}@${host}:${port}`;
 }
 
-import {fileURLToPath} from 'node:url';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 
 function isMain() {
   const entry = process.argv[1];

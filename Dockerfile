@@ -1,5 +1,13 @@
 # syntax=docker/dockerfile:1
+# Bright Data Browser API only — no local Chrome or Xvfb.
 # Build (required on Apple Silicon): docker build --platform linux/amd64 -t chrome-devtools-mcp:local .
+#
+# Goose HTTP (MCP on :8080):
+#   docker run --rm -e BRIGHTDATA_AUTH -p 8080:8080 chrome-devtools-mcp:local
+#
+# Interactive pod (MCP :8090 + live view :6080):
+#   docker run --rm -e BRIGHTDATA_AUTH -e PORT=8090 -e ENABLE_SCREENCAST=1 \
+#     -p 8090:8090 -p 6080:6080 chrome-devtools-mcp:local
 
 FROM node:24-bookworm AS build
 
@@ -34,30 +42,18 @@ ENV NODE_ENV=production \
     CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1 \
     PUPPETEER_SKIP_DOWNLOAD=true \
     PORT=8080 \
-    HOST=0.0.0.0
+    HOST=0.0.0.0 \
+    ENABLE_SCREENCAST=0
 
 COPY --from=build /app/build ./build
 COPY --from=build /app/LICENSE ./LICENSE
 COPY scripts/goose-http-entrypoint.mjs /app/scripts/
 COPY scripts/brightdata-config.mjs /app/scripts/
-
-# Install "Chrome for Testing" into the Puppeteer cache and expose it at a
-# fixed path. Xvfb is included so the server can run Chrome HEADFUL (HEADFUL=1)
-# on a virtual display. Use: docker build --platform linux/amd64 ...
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends xvfb \
-    && npx puppeteer browsers install chrome --install-deps \
-    && CHROME_BIN="$(find /root/.cache/puppeteer/chrome -path '*/chrome-linux64/chrome' -type f | head -n 1)" \
-    && test -n "$CHROME_BIN" && test -x "$CHROME_BIN" \
-    && ln -sf "$CHROME_BIN" /usr/local/bin/chrome \
-    && /usr/local/bin/chrome --version \
-    && rm -rf /var/lib/apt/lists/*
-
+COPY scripts/brightdata-entrypoint.sh /app/scripts/
+COPY scripts/screencast-bridge.mjs /app/scripts/
 COPY scripts/goose-http-entrypoint-xvfb.sh /app/scripts/
-RUN chmod +x /app/scripts/goose-http-entrypoint-xvfb.sh
+RUN chmod +x /app/scripts/brightdata-entrypoint.sh /app/scripts/goose-http-entrypoint-xvfb.sh
 
-EXPOSE 8080
+EXPOSE 8080 6080 8090
 
-# Goose: http://<host>:8080/mcp?redis_channel=<messageId>_chrome_mcp
-# Set HEADFUL=1 to run headed Chrome on Xvfb (real UA, fewer bot blocks).
 ENTRYPOINT ["/app/scripts/goose-http-entrypoint-xvfb.sh"]

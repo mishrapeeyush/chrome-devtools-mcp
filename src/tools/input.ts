@@ -4,21 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {execFile} from 'child_process';
-import {promisify} from 'util';
-
 import {logger} from '../logger.js';
 import type {McpContext} from '../McpContext.js';
 import {zod} from '../third_party/index.js';
 import type {ElementHandle, KeyInput} from '../third_party/index.js';
 import type {TextSnapshotNode} from '../types.js';
-import {parseKey} from '../utils/keyboard.js';
-import {
-  humanMouseMove,
-  randomApproachStart,
-  randomPointInBox,
-  sleep,
-} from '../utils/humanMouse.js';
 import {
   humanMouseMoveWithBaseline,
   installBehaviorBaselineProbe,
@@ -26,9 +16,14 @@ import {
   puppeteerMouseClickable,
   readBehaviorBaselineProbe,
 } from '../utils/behaviorBaseline.js';
+import {
+  humanMouseMove,
+  randomApproachStart,
+  randomPointInBox,
+  sleep,
+} from '../utils/humanMouse.js';
+import {parseKey} from '../utils/keyboard.js';
 import type {WaitForEventsResult} from '../WaitForHelper.js';
-
-const execFileAsync = promisify(execFile);
 
 import {ToolCategory} from './categories.js';
 import type {ContextPage} from './ToolDefinition.js';
@@ -960,85 +955,6 @@ export const pressAndHold = definePageTool({
       );
     } finally {
       await client.detach();
-    }
-  },
-});
-
-export const x11PressAndHold = defineTool({
-  name: 'x11_press_and_hold',
-  description: `Performs a press-and-hold interaction using real X11 OS-level mouse events via xdotool on the Xvfb display. Unlike press_and_hold (which uses CDP), this sends genuine hardware-level events that the browser treats as real user input (isTrusted=true, no CDP markers). Use this for strict behavioral CAPTCHAs like Walmart's PerimeterX HUMAN Challenge that detect CDP automation. Requires the pod to have xdotool installed and DISPLAY set (standard in the novnc image). Coordinates are in browser viewport pixels — same as click_at coordinates.`,
-  annotations: {
-    category: ToolCategory.INPUT,
-    readOnlyHint: false,
-  },
-  schema: {
-    x: zod.number().describe('X coordinate in browser viewport pixels'),
-    y: zod.number().describe('Y coordinate in browser viewport pixels'),
-    durationMs: zod
-      .number()
-      .optional()
-      .describe('Hold duration in milliseconds (default 5000). Use 6000+ for strict CAPTCHAs.'),
-    display: zod
-      .string()
-      .optional()
-      .describe('X11 display to use (default ":99" — the Xvfb display in the novnc pod)'),
-    screenOffsetX: zod
-      .number()
-      .optional()
-      .describe('Additional X offset to convert viewport coords to screen coords (default 0). Compute as window.screenLeft.'),
-    screenOffsetY: zod
-      .number()
-      .optional()
-      .describe('Additional Y offset to convert viewport coords to screen coords. Compute as window.screenTop + (window.outerHeight - window.innerHeight). Typical Chrome on Xvfb: 72.'),
-  },
-  blockedByDialog: false,
-  verifyFilesSchema: [],
-  handler: async (request, response) => {
-    const {x, y, durationMs = 5000, display = ':99', screenOffsetX = 0, screenOffsetY = 0} = request.params;
-    const env = {...process.env, DISPLAY: display};
-
-    // Convert viewport coordinates to Xvfb screen coordinates.
-    // xdotool operates in screen space; take_screenshot returns viewport space.
-    // The Chrome window's viewport top-left on screen = screenTop + (outerH - innerH).
-    const sx = x + screenOffsetX;
-    const sy = y + screenOffsetY;
-    const holdSec = (durationMs / 1000).toFixed(2);
-
-    // Approach from a natural offset, ease-in to the target, then hold.
-    // All waypoints are clamped to >=0 so xdotool doesn't error on negative coords.
-    const clamp = (v: number) => Math.max(0, Math.round(v));
-    const startX = clamp(sx - 50 + Math.random() * 30);
-    const startY = clamp(sy + 20 + Math.random() * 15);
-
-    const approachArgs: string[] = ['mousemove', '--sync', String(startX), String(startY)];
-    const steps = 8;
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-      approachArgs.push(
-        'mousemove', '--sync',
-        String(clamp(startX + (sx - startX) * ease)),
-        String(clamp(startY + (sy - startY) * ease)),
-      );
-    }
-
-    const args = [
-      ...approachArgs,
-      'mousedown', '1',
-      'sleep', holdSec,
-      'mouseup', '1',
-    ];
-
-    try {
-      await execFileAsync('xdotool', args, {env});
-      response.appendResponseLine(
-        `x11_press_and_hold completed at viewport (${x}, ${y}) → screen (${sx}, ${sy}) for ${durationMs}ms via xdotool on ${display}`,
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      response.appendResponseLine(
-        `x11_press_and_hold failed: ${msg}. Is xdotool installed and DISPLAY=${display} correct?`,
-      );
     }
   },
 });

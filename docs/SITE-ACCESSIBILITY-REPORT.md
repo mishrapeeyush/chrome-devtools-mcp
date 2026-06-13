@@ -2,46 +2,45 @@
 
 _Last updated: 2026-06-13_
 
-This document records which websites the self-hosted browser-automation stack could
-reach, which ones blocked it, the **exact block mechanism**, and **workaround options**
-for each class of defense.
+> **Current stack (BD-only):** All browser automation runs on **Bright Data Scraping Browser**
+> via CDP (`BRIGHTDATA_AUTH` → `wss://...@brd.superproxy.io:9222`). No local Chrome, Xvfb,
+> Webshare, SOAX, or stealth CDP injection. Live view: CDP screencast on `:6080`.
+> Sections 2–7 below are **historical** results from the retired self-hosted + proxy stack.
+
+This document records which websites the automation stack could reach, block mechanisms,
+and workaround options.
 
 ---
 
-## 1. Test setup (what was tested)
+## 1. Test setup — Bright Data (current)
 
 | Aspect | Value |
 |--------|-------|
-| Browser mode | **Headful** Chrome on virtual X display (`Xvfb :99`), not `--headless` |
-| Driver | Plain `puppeteer` 25.1.0 + `mcp-proxy` over raw CDP (`--browserUrl`) |
-| Stealth | **Custom** CDP injection (`scripts/stealth-inject.js`) — NOT `puppeteer-extra-plugin-stealth` |
-| Profile | **Fresh** ephemeral K8s pod + new profile per run; destroyed after session (no reuse) |
-| Proxy (default) | **Webshare** — rotating **US residential** when no SOAX env is set |
-| Proxy (UAE) | **SOAX** — UAE residential via `proxy.soax.com:5000` when `SOAX_PROXY_PASS` is set |
-| Egress IP | US: AS7015 Comcast (Webshare). UAE: e& UAE / Ajman (SOAX, `83.110.129.29` verified) |
-| Throughput | ~1.5–2 pages/min (gated by the LLM agent loop, not browser speed) |
+| Browser | **Bright Data Scraping Browser** (managed Chrome on BD infrastructure) |
+| Driver | `chrome-devtools-mcp` + `mcp-proxy` over `--wsEndpoint` |
+| Stealth | **None** — do not inject WebGL/UA patches; BD maintains Client Hints coherence |
+| Geo | `BRIGHTDATA_COUNTRY` (e.g. `us`, `ae`) appended to zone username |
+| Live view | `scripts/screencast-bridge.mjs` on `:6080` when `ENABLE_SCREENCAST=1` |
+| Entrypoint | `scripts/brightdata-entrypoint.sh` |
 
-> **Webshare (verified 2026-06-12):** default in `config.go` + `pod_manager.go` →
-> `WEBSHARE_API_KEY` / `WEBSHARE_COUNTRY=US`. **No UAE exits** on the current plan (`AE count:0`).
->
-> **SOAX (verified 2026-06-13):** when `SOAX_PROXY_PASS` is set, Webshare is disabled and pods
-> get `CHROME_PROXY` / `CHROME_PROXY_USER` / `CHROME_PROXY_PASS` directly. Use the **exact Login**
-> from the SOAX dashboard with `country-ae` in the username for a UAE exit:
->
-> ```bash
-> SOAX_PROXY_PASS=<from SOAX dashboard>
-> SOAX_PROXY_USER=package-<id>-country-ae-sessionid-<sticky>-sessionlength-300
-> SOAX_COUNTRY=ae
-> SOAX_PROXY_HOST=http://proxy.soax.com:5000
-> ```
->
-> Dashboard login **without** `country-ae` exits in **UK** — always include country in username or
-> set Country: AE in SOAX Quick Access before copying credentials.
+```bash
+BRIGHTDATA_AUTH=brd-customer-XXX-zone-scraping_browser1:password
+BRIGHTDATA_COUNTRY=us
+```
 
-Stealth patches applied: `navigator.webdriver` removed, `window.chrome` restored,
-WebGL vendor/renderer spoofed, realistic `plugins`/`languages`/`permissions`,
-`hardwareConcurrency=8`, `deviceMemory=8`, `--disable-blink-features=AutomationControlled`,
-`--ignore-default-chrome-arg=--enable-automation`, spoofed Windows Chrome 124 UA.
+Smoke tests: `scripts/test-expedia-playground.mjs`, `scripts/test-brightdata-skyscanner.mjs`
+
+---
+
+## 1b. Test setup — legacy self-hosted (retired)
+
+| Aspect | Value |
+|--------|-------|
+| Browser mode | Headful Chrome on Xvfb (removed) |
+| Stealth | `stealth-inject.js` (removed) |
+| Proxy | Webshare / SOAX (removed) |
+
+Stealth patches that were applied: `navigator.webdriver`, WebGL spoof, etc.
 
 > **Key caveat:** "Accessible" below means the **homepage/landing page rendered**.
 > It does **not** guarantee a full transactional flow (search → checkout → payment)
@@ -210,24 +209,23 @@ TLS work beyond geo proxy alone.
 
 ---
 
-## 8. Expedia / DataDome — five-upgrade human flow (Jun 2026)
+## 8. Expedia / DataDome — Bright Data Playground flow (Jun 2026)
 
 Validated on Bright Data Scraping Browser (`BRIGHTDATA_COUNTRY=us`):
 
 | Step | Method | Result |
 |------|--------|--------|
-| Direct `navigate_page` → expedia.com | goto() | ❌ "Bot or Not?" immediately |
-| Google → organic Expedia link | Human entry | ✅ Travel-guide page with full UI |
-| Dwell 8–12s + scroll on guide page | Session trust | ✅ `datadome` cookie set |
-| Click "Next weekend" / widget (same tab) | Widget, not URL | ❌ DataDome on `Hotel-Search?...` |
-| `navigate_page` → `Hotel-Search?regionId=...` | goto() deep link | ❌ Known bot pattern — never use |
+| Direct `goto(expedia.com)` + `domcontentloaded` | Playground pattern | ✅ Full homepage + search widget |
+| Fill widget + submit search | Widget click | ✅ Navigates to `Hotel-Search?...` (no DataDome block) |
+| DOM evaluate on `Hotel-Search` | page.evaluate | ⚠️ BD account `robots.txt` restriction (`brob`) — ask AM to allow |
+| `goto(Hotel-Search?regionId=...)` deep link | goto() | ❌ Never use — bot pattern |
 
-**Agent rules (goose `prompt.go` + skill `expedia-datadome`):**
+**Agent rules (`expedia-datadome` skill):**
 
-1. **Never goto() Hotel-Search URLs** — use the on-page search widget.
-2. **Google → organic click** before any Expedia page.
-3. **Same tab/session** — carry `datadome` cookies; no `new_page` for search.
-4. **Intercept XHR/fetch** (`list_network_requests` → `get_network_request`) for hotel JSON.
-5. **Decision tree** — if blocked: check cookie, dwell time, widget vs goto(); captcha → noVNC handoff.
+1. **Direct homepage** on BD — no Google warm-up required.
+2. **Never goto() Hotel-Search URLs** — use the on-page search widget.
+3. **Same tab/session** — carry cookies; no `new_page` for search.
+4. **XHR/fetch** (`list_network_requests` → `get_network_request`) for hotel JSON.
+5. Captcha → `request_user_input` + live view screencast (`:6080`).
 
-Test script: `node scripts/test-expedia-human-flow.mjs` (Bright Data auth required).
+Test script: `node scripts/test-expedia-playground.mjs` (set `EXPEDIA_SUBMIT=1` to include search).

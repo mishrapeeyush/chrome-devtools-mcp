@@ -35,16 +35,17 @@ description: Uses Chrome DevTools via MCP for efficient debugging, troubleshooti
 
 You can send multiple tool calls in parallel, but maintain correct order: navigate → wait → snapshot → interact.
 
-### Expedia / DataDome (PerimeterX session trust)
+### Expedia / DataDome (Bright Data Scraping Browser)
 
-For **expedia.com** / **expedia.ae**, load the `expedia-datadome` skill first. Critical rules:
+For **expedia.com** / **expedia.ae**, load the `expedia-datadome` skill first. Requires Bright Data Browser API (`--wsEndpoint` / `BRIGHTDATA_AUTH`).
 
-- **Never** `navigate_page` to `Hotel-Search?regionId=...` — use the on-page search widget
-- Enter via **Google → organic click**, dwell **8–12s** on travel-guide page, **same tab** throughout
-- **`behavior_baseline` install → dwell/fidget → finalize** before Search — captures session rhythm
-- **`click_human`** on Search with `useBaseline: true` (not `click`) — baseline-normalized Bezier + timing
+- **Direct** `navigate_page` → `https://www.expedia.com/` (`domcontentloaded`) — no Google warm-up on BD
+- Dismiss popups, settle ~3s, fill the **on-page search widget** — **never** goto `Hotel-Search?...` URLs
+- **`behavior_baseline` install → dwell/fidget → finalize** before Search when using human pacing
+- **`click_human`** on Search with `useBaseline: true`
 - **`human_hover_path`** for pre-search fidget on Dates/Travelers
-- On captcha iframe → `request_user_input` + noVNC handoff
+- Hotel data: **`list_network_requests`** / **`get_network_request`** (XHR), not DOM on restricted URLs
+- Captcha → `request_user_input` + live view screencast at `:6080`
 
 ### Testing an extension
 

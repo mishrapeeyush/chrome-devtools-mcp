@@ -46,12 +46,12 @@ import type {
   GeolocationOptions,
   ExtensionServiceWorker,
 } from './types.js';
+import type {BehaviorBaseline} from './utils/behaviorBaseline.js';
 import {
   ensureExtension,
   getTempFilePath,
   resolveCanonicalPath,
 } from './utils/files.js';
-import type {BehaviorBaseline} from './utils/behaviorBaseline.js';
 import {getNetworkMultiplierFromString} from './WaitForHelper.js';
 
 interface McpContextOptions {
