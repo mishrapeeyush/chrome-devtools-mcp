@@ -21,6 +21,8 @@
 // server accepts the WS upgrade on any path.
 
 import {createServer} from 'node:http';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 
 import puppeteer from 'puppeteer-core';
 import {WebSocketServer} from 'ws';
@@ -42,43 +44,78 @@ const LIVE_HTML = `<!doctype html>
 <title>Live browser</title>
 <style>
   html, body { margin: 0; height: 100%; background: #0b0b0b; overflow: hidden; }
-  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
-  #view { max-width: 100%; max-height: 100%; image-rendering: auto; outline: none; cursor: crosshair; background: #000; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  #view { display: block; image-rendering: auto; outline: none; cursor: default; background: #000; }
   #status { position: fixed; top: 8px; left: 8px; font: 12px/1.4 system-ui, sans-serif; color: #ddd; background: rgba(0,0,0,.5); padding: 4px 8px; border-radius: 6px; pointer-events: none; }
+  #hint { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); font: 12px/1.4 system-ui, sans-serif; color: #aaa; background: rgba(0,0,0,.55); padding: 6px 10px; border-radius: 6px; pointer-events: none; }
 </style>
 </head>
 <body>
-<div id="wrap"><canvas id="view" tabindex="0"></canvas></div>
+<div id="wrap"><canvas id="view" tabindex="0" autofocus></canvas></div>
 <div id="status">connecting…</div>
+<div id="hint">Click the page to focus · cursor follows links, inputs, and buttons</div>
 <script>
 (() => {
   const canvas = document.getElementById('view');
+  const wrap = document.getElementById('wrap');
   const ctx = canvas.getContext('2d', {alpha: false});
   const status = document.getElementById('status');
-  // Intrinsic page size in CSS px, learned from frame metadata. Used to map
-  // viewer-normalised input coordinates back to page coordinates.
-  let pageW = ${MAX_WIDTH}, pageH = ${MAX_HEIGHT};
+  // Page viewport in CSS px (from CDP metadata). Clicks map to these, not bitmap px.
+  let viewportW = ${MAX_WIDTH}, viewportH = ${MAX_HEIGHT};
 
   const base = location.pathname.replace(/[^/]*$/, '');
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = proto + '//' + location.host + base + 'ws';
   let ws;
   let lastMove = 0;
+  let sessionEnded = false;
+  let reconnectAttempts = 0;
+
+  function fitCanvasToWindow() {
+    if (!canvas.width || !canvas.height) return;
+    const maxW = wrap.clientWidth;
+    const maxH = wrap.clientHeight;
+    const scale = Math.min(maxW / canvas.width, maxH / canvas.height);
+    canvas.style.width = Math.floor(canvas.width * scale) + 'px';
+    canvas.style.height = Math.floor(canvas.height * scale) + 'px';
+  }
+  window.addEventListener('resize', fitCanvasToWindow);
 
   function connect() {
+    if (sessionEnded) return;
     ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => { status.textContent = 'live'; setTimeout(() => status.style.opacity = '0', 1500); };
-    ws.onclose = () => { status.style.opacity = '1'; status.textContent = 'reconnecting…'; setTimeout(connect, 1000); };
+    ws.onopen = () => {
+      reconnectAttempts = 0;
+      status.textContent = 'live — click to interact';
+      canvas.focus();
+      setTimeout(() => status.style.opacity = '0', 2000);
+    };
+    ws.onclose = () => {
+      if (sessionEnded) return;
+      status.style.opacity = '1';
+      reconnectAttempts++;
+      if (reconnectAttempts > 20) {
+        status.textContent = 'session ended — start a new execute for a fresh live view';
+        return;
+      }
+      status.textContent = 'reconnecting…';
+      setTimeout(connect, 1000);
+    };
     ws.onmessage = async (ev) => {
       if (typeof ev.data === 'string') {
         try {
           const m = JSON.parse(ev.data);
           if (m.type === 'meta' && m.width && m.height) {
-            pageW = m.width; pageH = m.height;
-            if (canvas.width !== pageW || canvas.height !== pageH) {
-              canvas.width = pageW; canvas.height = pageH;
-            }
+            viewportW = m.width; viewportH = m.height;
+            fitCanvasToWindow();
+          } else if (m.type === 'cursor' && m.value) {
+            canvas.style.cursor = m.value;
+          } else if (m.type === 'session' && m.status === 'ended') {
+            sessionEnded = true;
+            status.style.opacity = '1';
+            status.textContent = 'browser session ended';
+            try { ws.close(); } catch {}
           }
         } catch {}
         return;
@@ -87,10 +124,10 @@ const LIVE_HTML = `<!doctype html>
       const bmp = await createImageBitmap(blob);
       if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
         canvas.width = bmp.width; canvas.height = bmp.height;
-        pageW = bmp.width; pageH = bmp.height;
       }
       ctx.drawImage(bmp, 0, 0);
       bmp.close();
+      fitCanvasToWindow();
     };
   }
   connect();
@@ -100,7 +137,10 @@ const LIVE_HTML = `<!doctype html>
     const r = canvas.getBoundingClientRect();
     const x = (e.clientX - r.left) / r.width;
     const y = (e.clientY - r.top) / r.height;
-    return {x: Math.max(0, Math.min(1, x)) * pageW, y: Math.max(0, Math.min(1, y)) * pageH};
+    return {
+      x: Math.max(0, Math.min(1, x)) * viewportW,
+      y: Math.max(0, Math.min(1, y)) * viewportH,
+    };
   }
   const BTN = {0: 'left', 1: 'middle', 2: 'right'};
 
@@ -112,14 +152,17 @@ const LIVE_HTML = `<!doctype html>
     send({t: 'm', type: 'mouseMoved', x: p.x, y: p.y, button: 'none'});
   });
   canvas.addEventListener('mousedown', (e) => {
+    e.preventDefault();
     canvas.focus();
     const p = norm(e);
     send({t: 'm', type: 'mousePressed', x: p.x, y: p.y, button: BTN[e.button] ?? 'left', clickCount: 1});
   });
   canvas.addEventListener('mouseup', (e) => {
+    e.preventDefault();
     const p = norm(e);
     send({t: 'm', type: 'mouseReleased', x: p.x, y: p.y, button: BTN[e.button] ?? 'left', clickCount: 1});
   });
+  wrap.addEventListener('click', () => canvas.focus());
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -179,6 +222,157 @@ function broadcastMeta() {
   }
 }
 
+function broadcastCursor(cursor) {
+  const msg = JSON.stringify({type: 'cursor', value: cursor});
+  for (const ws of clients) {
+    if (ws.readyState === 1) {
+      ws.send(msg);
+    }
+  }
+}
+
+function broadcastSessionEnded() {
+  const msg = JSON.stringify({type: 'session', status: 'ended'});
+  for (const ws of clients) {
+    if (ws.readyState === 1) {
+      ws.send(msg);
+    }
+  }
+}
+
+/** @param {import('puppeteer-core').Page} page */
+async function resolveCursorAt(page, pageX, pageY) {
+  if (page.isClosed()) {
+    return 'default';
+  }
+  try {
+    const cursor = await page.evaluate((x, y) => {
+      /** @param {Element} el */
+      function inferAutoCursor(el) {
+        const tag = el.tagName;
+        if (tag === 'A' && el.hasAttribute('href')) {
+          return 'pointer';
+        }
+        if (tag === 'TEXTAREA') {
+          return 'text';
+        }
+        if (tag === 'INPUT') {
+          const type = (el.getAttribute('type') || 'text').toLowerCase();
+          if (
+            type === 'text' ||
+            type === 'search' ||
+            type === 'email' ||
+            type === 'tel' ||
+            type === 'url' ||
+            type === 'password' ||
+            type === 'number'
+          ) {
+            return 'text';
+          }
+        }
+        const role = el.getAttribute('role');
+        if (
+          role === 'button' ||
+          role === 'link' ||
+          role === 'menuitem' ||
+          role === 'tab' ||
+          role === 'switch' ||
+          role === 'checkbox' ||
+          role === 'radio'
+        ) {
+          return 'pointer';
+        }
+        if (el.isContentEditable) {
+          return 'text';
+        }
+        return null;
+      }
+
+      /**
+       * @param {Document} doc
+       * @param {number} px
+       * @param {number} py
+       * @param {number} depth
+       */
+      function resolveInDocument(doc, px, py, depth) {
+        if (depth > 8) {
+          return 'default';
+        }
+        const el = doc.elementFromPoint(Math.round(px), Math.round(py));
+        if (!el) {
+          return 'default';
+        }
+        if (
+          (el.tagName === 'IFRAME' || el.tagName === 'FRAME') &&
+          el instanceof HTMLIFrameElement
+        ) {
+          const frameDoc = el.contentDocument;
+          if (frameDoc) {
+            const rect = el.getBoundingClientRect();
+            const inner = resolveInDocument(
+              frameDoc,
+              px - rect.left,
+              py - rect.top,
+              depth + 1,
+            );
+            if (inner !== 'default') {
+              return inner;
+            }
+          }
+        }
+        let node = el;
+        const view = doc.defaultView;
+        while (node) {
+          if (node instanceof Element && view) {
+            const cur = view.getComputedStyle(node).cursor;
+            if (cur && cur !== 'auto') {
+              return cur;
+            }
+            const inferred = inferAutoCursor(node);
+            if (inferred) {
+              return inferred;
+            }
+          }
+          if (node.parentElement) {
+            node = node.parentElement;
+          } else {
+            const root = node.getRootNode();
+            node =
+              root instanceof ShadowRoot && root.host instanceof Element
+                ? root.host
+                : null;
+          }
+        }
+        return 'default';
+      }
+
+      return resolveInDocument(document, x, y, 0);
+    }, pageX, pageY);
+    if (typeof cursor === 'string' && cursor.length > 0) {
+      return cursor;
+    }
+  } catch {
+    // page may be navigating
+  }
+  return 'default';
+}
+
+let lastCursorSent = 'default';
+let lastCursorQueryMs = 0;
+
+async function maybeSyncCursor(page, pageX, pageY) {
+  const now = Date.now();
+  if (now - lastCursorQueryMs < 80) {
+    return;
+  }
+  lastCursorQueryMs = now;
+  const cursor = await resolveCursorAt(page, pageX, pageY);
+  if (cursor !== lastCursorSent) {
+    lastCursorSent = cursor;
+    broadcastCursor(cursor);
+  }
+}
+
 async function stopActive() {
   const session = activeSession;
   activeSession = null;
@@ -221,6 +415,12 @@ async function streamPage(page) {
   activeSession = session;
   activePage = page;
 
+  page.on('framenavigated', () => {
+    if (activePage === page) {
+      void pickActivePage();
+    }
+  });
+
   session.on('Page.screencastFrame', async ({data, sessionId, metadata}) => {
     if (metadata?.deviceWidth && metadata?.deviceHeight) {
       const w = Math.round(metadata.deviceWidth);
@@ -245,9 +445,70 @@ async function streamPage(page) {
     }
   });
   console.error('[screencast] streaming', page.url());
+  lastCursorSent = 'default';
+  broadcastCursor('default');
 }
 
 let browserRef = null;
+let browserListenersBound = false;
+let httpListening = false;
+
+function bindBrowserListeners(browser) {
+  if (browserListenersBound) {
+    return;
+  }
+  browserListenersBound = true;
+  browser.on('targetcreated', async target => {
+    if (target.type() === 'page') {
+      try {
+        const page = await target.page();
+        if (page) {
+          await streamPage(page);
+        }
+      } catch {
+        // target may have vanished
+      }
+    }
+  });
+  browser.on('targetdestroyed', () => {
+    void pickActivePage();
+  });
+  browser.on('disconnected', () => {
+    console.error('[screencast] browser disconnected');
+    broadcastSessionEnded();
+    browserListenersBound = false;
+    browserRef = null;
+    void stopActive();
+  });
+}
+
+/**
+ * Stream the same Puppeteer browser the MCP server controls (avoids a second
+ * Bright Data session that would show a blank live view).
+ * @param {import('puppeteer-core').Browser} browser
+ * @param {{port?: number}} [options]
+ */
+export async function attachLiveViewBrowser(browser, options = {}) {
+  if (browserRef === browser && httpListening && activePage) {
+    return;
+  }
+  browserRef = browser;
+  bindBrowserListeners(browser);
+  await pickActivePage();
+  const port = options.port ?? PORT;
+  if (!httpListening) {
+    await new Promise((resolve, reject) => {
+      httpServer.once('error', reject);
+      httpServer.listen(port, '0.0.0.0', () => {
+        httpListening = true;
+        resolve(undefined);
+      });
+    });
+    console.error(
+      `[screencast] live view on :${port} (shared MCP browser, interactive)`,
+    );
+  }
+}
 
 async function pickActivePage() {
   if (!browserRef) {
@@ -281,10 +542,12 @@ function modifiersToButtons(button) {
 
 async function handleInput(msg) {
   const session = activeSession;
-  if (!session) {
+  const page = activePage;
+  if (!session || !page) {
     return;
   }
   try {
+    await page.bringToFront();
     if (msg.t === 'm') {
       if (msg.type === 'mouseWheel') {
         await session.send('Input.dispatchMouseEvent', {
@@ -305,6 +568,9 @@ async function handleInput(msg) {
           msg.type === 'mouseReleased' ? 0 : modifiersToButtons(msg.button),
         clickCount: msg.clickCount ?? 0,
       });
+      if (msg.type === 'mouseMoved') {
+        await maybeSyncCursor(page, msg.x, msg.y);
+      }
     } else if (msg.t === 'k') {
       await session.send('Input.dispatchKeyEvent', {
         type: msg.type,
@@ -330,6 +596,7 @@ wss.on('connection', ws => {
       height: latestMeta.height,
     }),
   );
+  ws.send(JSON.stringify({type: 'cursor', value: lastCursorSent}));
   if (lastFrame) {
     ws.send(lastFrame);
   }
@@ -364,8 +631,9 @@ async function main() {
   // Retry connect until the DevTools endpoint is reachable.
   for (let i = 0; ; i++) {
     try {
-      browserRef = await connectBrowser();
-      break;
+      const browser = await connectBrowser();
+      await attachLiveViewBrowser(browser);
+      return;
     } catch (err) {
       if (i > 60) {
         console.error(
@@ -378,34 +646,13 @@ async function main() {
       await new Promise(r => setTimeout(r, 500));
     }
   }
-
-  browserRef.on('targetcreated', async target => {
-    if (target.type() === 'page') {
-      try {
-        const page = await target.page();
-        if (page) {
-          await streamPage(page);
-        }
-      } catch {
-        // target may have vanished
-      }
-    }
-  });
-  browserRef.on('targetdestroyed', () => {
-    void pickActivePage();
-  });
-  browserRef.on('disconnected', () => {
-    console.error('[screencast] browser disconnected; exiting');
-    process.exit(1);
-  });
-
-  await pickActivePage();
-
-  httpServer.listen(PORT, '0.0.0.0', () => {
-    console.error(
-      `[screencast] live view on :${PORT} (CDP screencast, interactive)`,
-    );
-  });
 }
 
-void main();
+const invokedDirectly =
+  process.argv[1] &&
+  path.resolve(process.argv[1]) ===
+    path.resolve(fileURLToPath(import.meta.url));
+
+if (invokedDirectly) {
+  void main();
+}

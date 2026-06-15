@@ -43,7 +43,7 @@ ENV NODE_ENV=production \
     PUPPETEER_SKIP_DOWNLOAD=true \
     PORT=8080 \
     HOST=0.0.0.0 \
-    ENABLE_SCREENCAST=0
+    ENABLE_SCREENCAST=1
 
 COPY --from=build /app/build ./build
 COPY --from=build /app/LICENSE ./LICENSE

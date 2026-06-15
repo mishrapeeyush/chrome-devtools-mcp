@@ -21,6 +21,8 @@ import {InMemoryEventStore, proxyServer, startHTTPServer, tapTransport} from 'mc
 import {createClient} from 'redis';
 
 import {buildBrightDataWsEndpoint, parseBrightDataAuth} from './brightdata-config.mjs';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? '0.0.0.0';
@@ -28,7 +30,10 @@ const REDIS_URL = process.env.REDIS_URL?.trim() ?? '';
 const REQUEST_TIMEOUT = Number(process.env.MCP_REQUEST_TIMEOUT ?? 3_600_000);
 const CONNECTION_TIMEOUT = Number(process.env.MCP_CONNECTION_TIMEOUT ?? 120_000);
 
-const CHROME_MCP_BIN = '/app/build/src/bin/chrome-devtools-mcp.js';
+const _scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const CHROME_MCP_BIN =
+  process.env.CHROME_MCP_BIN?.trim() ??
+  path.resolve(_scriptDir, '../build/src/bin/chrome-devtools-mcp.js');
 
 function buildChromeMcpArgs() {
   if (!parseBrightDataAuth()) {
@@ -106,7 +111,10 @@ async function createServer(req) {
   const baseTransport = new StdioClientTransport({
     command: process.execPath,
     args: CHROME_ARGS,
-    env: process.env,
+    env: {
+      ...process.env,
+      ENABLE_SCREENCAST: process.env.ENABLE_SCREENCAST ?? '1',
+    },
     stderr: 'inherit',
   });
 
@@ -190,7 +198,7 @@ await startHTTPServer({
   port: PORT,
   streamEndpoint: '/mcp',
   sseEndpoint: null,
-  stateless: true,
+  stateless: false,
   requestTimeout: REQUEST_TIMEOUT,
 });
 

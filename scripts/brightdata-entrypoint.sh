@@ -36,19 +36,13 @@ if [ -n "${BRIGHTDATA_COUNTRY:-}" ]; then
 fi
 
 if [ "$ENABLE_SCREENCAST" = "1" ] || [ "$ENABLE_SCREENCAST" = "true" ] || [ "$ENABLE_SCREENCAST" = "yes" ]; then
-  echo "[brightdata-entrypoint] live view at http://${HOST}:6080/"
-  SCREENCAST_MAX_WIDTH="${SCREENCAST_MAX_WIDTH:-1280}" \
-  SCREENCAST_MAX_HEIGHT="${SCREENCAST_MAX_HEIGHT:-800}" \
-    node /app/scripts/screencast-bridge.mjs >/tmp/screencast.log 2>&1 &
-  echo "[brightdata-entrypoint] screencast bridge started (pid $!)"
-  sleep 2
+  echo "[brightdata-entrypoint] live view will attach to MCP browser on :6080"
 fi
 
 exec /app/node_modules/.bin/mcp-proxy \
   --port "$PORT" \
   --host "$HOST" \
   --server stream \
-  --stateless \
   --connectionTimeout "${MCP_CONNECTION_TIMEOUT:-120000}" \
   --requestTimeout "${MCP_REQUEST_TIMEOUT:-3600000}" \
   -- \

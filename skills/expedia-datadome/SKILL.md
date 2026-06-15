@@ -26,11 +26,4 @@ Do **not** CDP-inject WebGL/UA stealth patches on BD — BD manages fingerprint 
 - **`list_network_requests`** + **`get_network_request`** for hotel JSON (Hotel-Search DOM may be BD robots.txt restricted)
 - Captcha → `request_user_input` + live view screencast handoff (`:6080`)
 
-## Smoke test
-
-```bash
-BRIGHTDATA_AUTH='...' BRIGHTDATA_COUNTRY=us node scripts/test-expedia-playground.mjs
-EXPEDIA_SUBMIT=1 node scripts/test-expedia-playground.mjs  # includes widget submit
-```
-
-Success = homepage `ACCESSIBLE`, or search navigates to `Hotel-Search` without DataDome block.
+Success = homepage loads, widget search reaches `Hotel-Search` or XHR results without DataDome block (`take_screenshot`, `list_network_requests`).
