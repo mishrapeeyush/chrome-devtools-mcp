@@ -9,12 +9,25 @@ import type {McpContext} from '../McpContext.js';
 import {zod} from '../third_party/index.js';
 import type {ElementHandle, KeyInput} from '../third_party/index.js';
 import type {TextSnapshotNode} from '../types.js';
+import {
+  humanMouseMoveWithBaseline,
+  installBehaviorBaselineProbe,
+  normalizedHumanClick,
+  puppeteerMouseClickable,
+  readBehaviorBaselineProbe,
+} from '../utils/behaviorBaseline.js';
+import {
+  humanMouseMove,
+  randomApproachStart,
+  randomPointInBox,
+  sleep,
+} from '../utils/humanMouse.js';
 import {parseKey} from '../utils/keyboard.js';
 import type {WaitForEventsResult} from '../WaitForHelper.js';
 
 import {ToolCategory} from './categories.js';
 import type {ContextPage} from './ToolDefinition.js';
-import {definePageTool} from './ToolDefinition.js';
+import {definePageTool, defineTool} from './ToolDefinition.js';
 
 const dblClickSchema = zod
   .boolean()
@@ -140,9 +153,225 @@ export const click = definePageTool({
   },
 });
 
+export const behaviorBaseline = definePageTool({
+  name: 'behavior_baseline',
+  description: `Install or finalize a behavioral rhythm probe on the current page for DataDome baseline normalization. Call action=install at the start of travel-guide dwell, perform scroll/hover fidget for 8-12s, then action=finalize before click_human on Search. The captured move/click timing profile is reused so the search click matches the session baseline instead of bot-constant speed.`,
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: false,
+  },
+  schema: {
+    action: zod
+      .enum(['install', 'finalize', 'clear'])
+      .describe(
+        'install: start recording mousemove/click timing on this page. finalize: read probe metrics and store session baseline. clear: discard stored baseline.',
+      ),
+  },
+  blockedByDialog: false,
+  verifyFilesSchema: [],
+  handler: async (request, response, context) => {
+    const page = request.page.pptrPage;
+    if (request.params.action === 'clear') {
+      context.clearBehaviorBaseline();
+      response.appendResponseLine('Behavior baseline cleared for this session.');
+      return;
+    }
+    if (request.params.action === 'install') {
+      await installBehaviorBaselineProbe(page);
+      response.appendResponseLine(
+        'Behavior baseline probe installed. Dwell 8-12s with human_hover_path and scroll, then call behavior_baseline action=finalize before click_human.',
+      );
+      return;
+    }
+    const baseline = await readBehaviorBaselineProbe(page);
+    if (!baseline) {
+      throw new Error(
+        'No baseline probe data — call behavior_baseline action=install first, dwell on the page, then finalize.',
+      );
+    }
+    context.setBehaviorBaseline(baseline);
+    response.appendResponseLine(
+      `Baseline captured: meanMoveIntervalMs=${Math.round(baseline.meanMoveIntervalMs)}, variance=${Math.round(baseline.moveIntervalVariance)}, meanClickPauseMs=${Math.round(baseline.meanClickPauseMs)}, moveSamples=${baseline.moveSampleCount}. Use click_human with useBaseline=true on Search.`,
+    );
+  },
+});
+
+export const clickHuman = definePageTool({
+  name: 'click_human',
+  description: `Clicks an element using a human-like mouse trajectory (Gaussian-smoothed path or baseline-normalized Bezier when a behavior baseline was captured via behavior_baseline). REQUIRED for high-scrutiny actions on DataDome/PerimeterX sites (e.g. Expedia search button) where \`click\` triggers intent-based bot detection. Workflow: behavior_baseline install → dwell/fidget → behavior_baseline finalize → click_human on Search.`,
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: false,
+  },
+  schema: {
+    uid: zod
+      .string()
+      .describe(
+        'The uid of an element on the page from the page content snapshot',
+      ),
+    durationMs: zod
+      .number()
+      .optional()
+      .describe(
+        'Mouse travel duration in ms (default 900). Use 1200-1800 for search buttons.',
+      ),
+    preHoverMs: zod
+      .number()
+      .optional()
+      .describe(
+        'Pause at target before mousedown in ms (default 200-450 random).',
+      ),
+    useBaseline: zod
+      .boolean()
+      .optional()
+      .describe(
+        'When true (default), use behavior_baseline profile if captured. Set false to force generic Gaussian path.',
+      ),
+    includeSnapshot: includeSnapshotSchema,
+  },
+  blockedByDialog: true,
+  verifyFilesSchema: [],
+  handler: async (request, response, context) => {
+    const uid = request.params.uid;
+    const handle = await request.page.getElementByUid(uid);
+    try {
+      const box = await handle.boundingBox();
+      if (!box) {
+        throw new Error(
+          `Element ${uid} has no bounding box — cannot human-click.`,
+        );
+      }
+      const durationMs = request.params.durationMs ?? 900;
+      const preHoverMs =
+        request.params.preHoverMs ??
+        Math.round(200 + Math.random() * 250);
+      const useBaseline = request.params.useBaseline ?? true;
+      const baseline =
+        useBaseline ? context.getBehaviorBaseline() : undefined;
+      const page = request.page.pptrPage;
+      const mouse = page.mouse;
+      let clickSummary = '';
+
+      const result = await request.page.waitForEventsAfterAction(async () => {
+        if (baseline) {
+          const target = await normalizedHumanClick(
+            puppeteerMouseClickable(mouse),
+            box,
+            baseline,
+            durationMs,
+            preHoverMs,
+          );
+          clickSummary = `Baseline-normalized click at (${target.x},${target.y}) meanInterval=${Math.round(baseline.meanMoveIntervalMs)}ms`;
+        } else {
+          const target = randomPointInBox(box.x, box.y, box.width, box.height);
+          const start = randomApproachStart(target.x, target.y);
+          await humanMouseMove(
+            mouse,
+            start.x,
+            start.y,
+            target.x,
+            target.y,
+            durationMs,
+          );
+          await sleep(preHoverMs);
+          await mouse.click(target.x, target.y);
+          clickSummary = `Human-like click at (${target.x},${target.y}) after ${durationMs}ms approach`;
+        }
+      });
+      response.appendResponseLine(clickSummary);
+      response.attachWaitForResult(result);
+      if (request.params.includeSnapshot) {
+        response.includeSnapshot();
+      }
+    } catch (error) {
+      handleActionError(error, uid);
+    } finally {
+      void handle.dispose();
+    }
+  },
+});
+
+export const humanHoverPath = definePageTool({
+  name: 'human_hover_path',
+  description: `Moves the mouse along a human-like curved path to an element and hovers (no click). Use for pre-search "fidget" micro-interactions on booking forms — hover date field, travelers, nearby links before click_human on Search.`,
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: false,
+  },
+  schema: {
+    uid: zod.string().describe('Element uid to hover over'),
+    durationMs: zod
+      .number()
+      .optional()
+      .describe('Travel duration in ms (default 700)'),
+    dwellMs: zod
+      .number()
+      .optional()
+      .describe('Hover pause at target in ms (default 400-900 random)'),
+    includeSnapshot: includeSnapshotSchema,
+  },
+  blockedByDialog: true,
+  verifyFilesSchema: [],
+  handler: async (request, response, context) => {
+    const uid = request.params.uid;
+    const handle = await request.page.getElementByUid(uid);
+    try {
+      const box = await handle.boundingBox();
+      if (!box) {
+        throw new Error(`Element ${uid} has no bounding box.`);
+      }
+      const target = randomPointInBox(box.x, box.y, box.width, box.height);
+      const start = randomApproachStart(target.x, target.y);
+      const durationMs = request.params.durationMs ?? 700;
+      const dwellMs =
+        request.params.dwellMs ?? Math.round(400 + Math.random() * 500);
+      const baseline = context.getBehaviorBaseline();
+      const page = request.page.pptrPage;
+
+      const result = await request.page.waitForEventsAfterAction(async () => {
+        if (baseline) {
+          await humanMouseMoveWithBaseline(
+            page.mouse,
+            start.x,
+            start.y,
+            target.x,
+            target.y,
+            baseline,
+            durationMs,
+          );
+        } else {
+          await humanMouseMove(
+            page.mouse,
+            start.x,
+            start.y,
+            target.x,
+            target.y,
+            durationMs,
+          );
+        }
+        await sleep(dwellMs);
+      });
+
+      response.appendResponseLine(
+        baseline
+          ? `Baseline-normalized hover to (${target.x},${target.y}), dwelled ${dwellMs}ms`
+          : `Human hover path to (${target.x},${target.y}), dwelled ${dwellMs}ms`,
+      );
+      response.attachWaitForResult(result);
+      if (request.params.includeSnapshot) {
+        response.includeSnapshot();
+      }
+    } catch (error) {
+      handleActionError(error, uid);
+    } finally {
+      void handle.dispose();
+    }
+  },
+});
+
 export const clickAt = definePageTool({
   name: 'click_at',
-  description: `Clicks at the provided coordinates`,
+  description: `Clicks at the provided page coordinates (x, y). Essential for canvas-rendered UIs (Konva, WebGL, Chart.js, seat maps) where elements have no uid. Workflow: call get_element_bbox to get the canvas bounding box, compute the target pixel within the canvas, then call click_at(x, y). Always prefer click_at over evaluate_script for canvas interaction.`,
   annotations: {
     category: ToolCategory.INPUT,
     readOnlyHint: false,
@@ -542,5 +771,220 @@ export const pressKey = definePageTool({
     if (request.params.includeSnapshot) {
       response.includeSnapshot();
     }
+  },
+});
+
+export const getElementBbox = definePageTool({
+  name: 'get_element_bbox',
+  description: `Returns the bounding box {x, y, width, height} of an element in page coordinates. Use this to locate canvas-rendered UIs (seat maps, charts, Konva/WebGL canvases) where interaction must be done via click_at(x, y). Typical workflow: 1) call get_element_bbox on the canvas uid, 2) compute target coordinates within the canvas, 3) call click_at(x, y).`,
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: true,
+  },
+  schema: {
+    uid: zod
+      .string()
+      .describe(
+        'The uid of an element on the page from the page content snapshot',
+      ),
+  },
+  blockedByDialog: false,
+  verifyFilesSchema: [],
+  handler: async (request, response) => {
+    const uid = request.params.uid;
+    const handle = await request.page.getElementByUid(uid);
+    try {
+      const box = await handle.boundingBox();
+      if (!box) {
+        response.appendResponseLine(
+          `Element ${uid} has no bounding box — it may be hidden or not rendered in the viewport.`,
+        );
+        return;
+      }
+      response.appendResponseLine(
+        JSON.stringify({
+          x: Math.round(box.x),
+          y: Math.round(box.y),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+          centerX: Math.round(box.x + box.width / 2),
+          centerY: Math.round(box.y + box.height / 2),
+        }),
+      );
+    } finally {
+      void handle.dispose();
+    }
+  },
+});
+
+export const mouseDragHuman = definePageTool({
+  name: 'mouse_drag_human',
+  description: `Performs a human-like press-and-hold drag from (startX, startY) to (endX, endY) over durationMs milliseconds, using bezier-curved intermediate points with randomised jitter. Use this for CAPTCHA press-and-hold sliders (Datadome, PerimeterX, Cloudflare turnstile sliders) where a straight-line drag is detected as a bot. The motion follows a natural acceleration/deceleration curve with slight wobble.`,
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: false,
+  },
+  schema: {
+    startX: zod.number().describe('Start X coordinate in page pixels'),
+    startY: zod.number().describe('Start Y coordinate in page pixels'),
+    endX: zod.number().describe('End X coordinate in page pixels'),
+    endY: zod.number().describe('End Y coordinate in page pixels'),
+    durationMs: zod
+      .number()
+      .optional()
+      .describe(
+        'Total drag duration in milliseconds (default 2000). Increase for tighter CAPTCHA checks.',
+      ),
+  },
+  blockedByDialog: false,
+  verifyFilesSchema: [],
+  handler: async (request, response) => {
+    const {startX, startY, endX, endY, durationMs = 2000} = request.params;
+    const page = request.page.pptrPage;
+
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+
+    await humanMouseMove(page.mouse, startX, startY, endX, endY, durationMs);
+
+    await sleep(150 + Math.random() * 100);
+    await page.mouse.up();
+
+    response.appendResponseLine(
+      `Human-like drag completed from (${startX},${startY}) to (${endX},${endY}) over ${durationMs}ms`,
+    );
+  },
+});
+
+export const pressAndHold = definePageTool({
+  name: 'press_and_hold',
+  description: `Performs a precise press-and-hold interaction on an element at (x, y) for durationMs milliseconds using CDP browser input events — NOT VNC mouse events. Use this for press-and-hold CAPTCHAs (Walmart, Akamai, PerimeterX) where VNC introduces timing jitter that causes the hold to fail even for real humans. The element is located by coordinates; the hold uses PointerEvent + MouseEvent with realistic pressure values. Returns success or an error message.`,
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: false,
+  },
+  schema: {
+    x: zod.number().describe('X coordinate of the element center to hold'),
+    y: zod.number().describe('Y coordinate of the element center to hold'),
+    durationMs: zod
+      .number()
+      .optional()
+      .describe('How long to hold in milliseconds (default 3000). Increase to 4000+ for strict CAPTCHAs.'),
+  },
+  blockedByDialog: false,
+  verifyFilesSchema: [],
+  handler: async (request, response) => {
+    const {x, y, durationMs = 3000} = request.params;
+    const page = request.page.pptrPage;
+
+    // Use CDP Input.dispatchMouseEvent for timing-precise hold.
+    // Adds realistic approach movement + micro-jitter during hold to satisfy
+    // behavioral CAPTCHAs (PerimeterX HUMAN Challenge, Akamai) that track
+    // mouse trajectory, not just button state.
+    const client = await page.createCDPSession();
+    try {
+      const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+      // Approach: move from an offset position towards the button in ~10 steps
+      const startX = x - 60 + Math.round(Math.random() * 40);
+      const startY = y + 15 + Math.round(Math.random() * 20);
+      const steps = 12;
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        // Ease-in-out curve for natural deceleration near the target
+        const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+        await client.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          x: Math.round(startX + (x - startX) * ease),
+          y: Math.round(startY + (y - startY) * ease),
+          button: 'none' as const,
+          buttons: 0,
+          modifiers: 0,
+          pointerType: 'mouse' as const,
+        });
+        await sleep(8 + Math.round(Math.random() * 12));
+      }
+
+      // Press down
+      await client.send('Input.dispatchMouseEvent', {
+        type: 'mousePressed',
+        x,
+        y,
+        button: 'left' as const,
+        buttons: 1,
+        clickCount: 1,
+        modifiers: 0,
+        pointerType: 'mouse' as const,
+        force: 0.5,
+      });
+
+      // Hold with micro-jitter to simulate natural hand tremor
+      const jitterIntervalMs = 80;
+      const jitterSteps = Math.floor(durationMs / jitterIntervalMs);
+      for (let i = 0; i < jitterSteps; i++) {
+        const jx = x + (Math.random() - 0.5) * 2;
+        const jy = y + (Math.random() - 0.5) * 2;
+        await client.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          x: Math.round(jx * 10) / 10,
+          y: Math.round(jy * 10) / 10,
+          button: 'left' as const,
+          buttons: 1,
+          modifiers: 0,
+          pointerType: 'mouse' as const,
+          force: 0.5,
+        });
+        await sleep(jitterIntervalMs);
+      }
+
+      // Release
+      await client.send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased',
+        x,
+        y,
+        button: 'left' as const,
+        buttons: 0,
+        clickCount: 1,
+        modifiers: 0,
+        pointerType: 'mouse' as const,
+        force: 0,
+      });
+
+      response.appendResponseLine(
+        `Press-and-hold completed at (${x}, ${y}) for ${durationMs}ms via CDP`,
+      );
+    } finally {
+      await client.detach();
+    }
+  },
+});
+
+export const requestUserInput = defineTool({
+  name: 'request_user_input',
+  description: `Pause the session and ask the user for information that was not provided in the original task — for example, which seat row to pick, an OTP, a CAPTCHA answer, a password, or a yes/no confirmation. The session will be paused and the user's response will be injected when the session resumes. Use inputType "text" for open-ended answers, "otp" for one-time codes, "password" for sensitive values, "confirm" for yes/no choices. ALWAYS call this instead of guessing or making assumptions when a required decision is missing.`,
+  annotations: {
+    category: ToolCategory.INPUT,
+    readOnlyHint: true,
+  },
+  schema: {
+    prompt: zod
+      .string()
+      .describe('The question or instruction to display to the user'),
+    inputType: zod
+      .enum(['text', 'otp', 'password', 'confirm'])
+      .describe(
+        'The type of input expected: "text" for general answers, "otp" for one-time codes, "password" for sensitive values, "confirm" for yes/no',
+      ),
+  },
+  blockedByDialog: false,
+  verifyFilesSchema: [],
+  handler: async (request, response) => {
+    const {prompt, inputType} = request.params;
+    response.appendResponseLine(
+      `AWAITING_INPUT: ${JSON.stringify({prompt, inputType})}`,
+    );
+    response.appendResponseLine(
+      `Session paused. Waiting for user input: ${prompt}`,
+    );
   },
 });

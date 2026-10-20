@@ -5,6 +5,8 @@
  */
 
 import type fs from 'node:fs';
+import path from 'node:path';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 
 import type {parseArguments} from './bin/chrome-devtools-mcp-cli-options.js';
 import type {Channel} from './browser.js';
@@ -36,6 +38,62 @@ export {SessionManager} from './SessionManager.js';
 type ServerArgs = ReturnType<typeof parseArguments>;
 
 const DEFAULT_SESSION_MAX_LIFETIME_MS = 1_500_000;
+
+function isScreencastEnabled(): boolean {
+  const v = process.env['ENABLE_SCREENCAST']?.trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+function screencastBridgeModuleUrl(): string {
+  const scriptPath = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../../scripts/screencast-bridge.mjs',
+  );
+  return pathToFileURL(scriptPath).href;
+}
+
+let liveViewAttachedBrowser: Browser | undefined;
+
+function scheduleLiveViewAttach(browser: Browser): void {
+  if (!isScreencastEnabled()) {
+    return;
+  }
+  if (liveViewAttachedBrowser === browser) {
+    return;
+  }
+  liveViewAttachedBrowser = browser;
+  browser.once('disconnected', () => {
+    if (liveViewAttachedBrowser === browser) {
+      liveViewAttachedBrowser = undefined;
+    }
+  });
+  void (async () => {
+    try {
+      const port = Number(
+        process.env['SCREENCAST_PORT'] ??
+          process.env['NOVNC_PORT'] ??
+          6080,
+      );
+      const mod: unknown = await import(screencastBridgeModuleUrl());
+      if (
+        mod &&
+        typeof mod === 'object' &&
+        'attachLiveViewBrowser' in mod &&
+        typeof mod.attachLiveViewBrowser === 'function'
+      ) {
+        await mod.attachLiveViewBrowser(browser, {port});
+        console.error(`[chrome-mcp] live view attached on :${port}`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      console.error('[chrome-mcp] Failed to start live view screencast:', message);
+      if (stack) {
+        console.error(stack);
+      }
+    }
+  })();
+}
 
 /**
  * Launches a new Chrome (or attaches to an existing one) according to the CLI
@@ -127,6 +185,7 @@ export function createSessionManager(
         options.logFile,
         browserManager,
       );
+      scheduleLiveViewAttach(browser);
       const context = await createContextForBrowser(serverArgs, browser);
       return {context, browserManager};
     },
@@ -238,6 +297,7 @@ export async function createMcpServer(
       options.logFile,
       browserManager,
     );
+    scheduleLiveViewAttach(browser);
     if (context?.browser !== browser) {
       context = await createContextForBrowser(serverArgs, browser);
       context.setRoots(latestRoots);

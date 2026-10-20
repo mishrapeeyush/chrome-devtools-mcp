@@ -23,7 +23,7 @@ export class TextSnapshot {
   // bound the tool call never returns, the global tool mutex is never
   // released, and every subsequent MCP request blocks forever. Exposed as a
   // mutable static so tests can shrink it.
-  static snapshotTimeoutMs = 10_000;
+  static snapshotTimeoutMs = 30_000;
 
   static resetCounter() {
     TextSnapshot.nextSnapshotId = 1;
